@@ -1,0 +1,9 @@
+version: '3.8'
+services:
+  brain-graph:
+    build: .
+    ports:
+      - "9121:9121"
+    volumes:
+      - ~/.hermes:/data:ro
+      - ./config.yaml:/app/config.yaml:ro

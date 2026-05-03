@@ -1,0 +1,31 @@
+# BrainGraph Configuration
+server:
+  host: "0.0.0.0"
+  port: 9121
+  debug: false
+
+# Data sources — add as many as you need
+sources:
+  # Hermes Agent fact_store (auto-detected)
+  - name: "AI Memory"
+    type: "sqlite"
+    path: "~/.hermes/memory_store.db"
+
+  # Markdown wiki folder
+  # - name: "Knowledge Wiki"
+  #   type: "markdown"
+  #   path: "~/wiki"
+
+  # Obsidian vault
+  # - name: "My Vault"
+  #   type: "obsidian"
+  #   path: "~/obsidian-vault"
+
+  # JSON data
+  # - name: "Project Data"
+  #   type: "json"
+  #   path: "./data/sample.json"
+
+# Optional password protection
+# auth:
+#   password: "your-password"

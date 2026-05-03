@@ -14,7 +14,7 @@ Turn your AI agent's memory, wiki, or any structured data into a beautiful inter
 
 ## ✨ Features
 
-- 🤖 **AI Memory Viz** — Directly reads Hermes Agent fact_store / Claude Code memory
+- 🤖 **AI Memory Viz** — Auto-detects SQLite schema — works with Hermes Agent fact_store out of the box
 - 📝 **Wiki Graph** — Auto-generates graph from Markdown `[[links]]`
 - 📓 **Obsidian Compatible** — Drop your vault, get a web-based graph view
 - ⚡ **Zero Config** — Point at a file/folder, it just works
@@ -54,7 +54,7 @@ It will auto-detect `~/.hermes/memory_store.db`.
 | Who | What |
 |-----|------|
 | **Hermes Agent users** | Visualize your agent's entire memory store |
-| **Claude Code users** | Export and explore your AI's knowledge |
+| **Any AI users** | Export your AI's knowledge and explore it |
 | **Obsidian users** | Web-based graph view, no Electron needed |
 | **Knowledge workers** | Turn any structured data into a graph |
 | **Teams** | Share a live visualization of your knowledge base |
@@ -132,6 +132,13 @@ Register it in `adapters/__init__.py` and add the type to `config.yaml`.
 | `GET /api/stats` | Statistics |
 | `GET /api/search?q=keyword` | Search nodes and facts |
 
+## ⚠️ Known Limitations
+
+- **Association strategy** — Edges are built from keyword overlap, not semantic vector similarity. Two nodes sharing a common word will be linked even if unrelated in meaning.
+- **SQLite adapter** — Requires tables with recognizable column names (`name`, `type`, `content`, etc.). Tables with completely different schemas won't auto-detect correctly.
+- **Markdown associations** — Relies on heading/keyword matching. Notes without shared keywords won't be linked, even if topically related.
+- **Scalability** — Force-directed layout may lag with 500+ nodes. Consider filtering by source or type for large datasets.
+
 ## 🎯 Why BrainGraph?
 
 **Obsidian** requires you to manually create `[[links]]`. **Neo4j** needs a dedicated database. **Gephi** is a heavy desktop app.
@@ -166,7 +173,7 @@ MIT © 2026 AgentMJ
 
 ### 特色
 
-- 🤖 直接读取 Hermes Agent 的 fact_store 记忆库
+- 🤖 自动识别 SQLite 数据库结构 — 开箱即用支持 Hermes Agent fact_store
 - 📝 自动从 Markdown 的 `[[链接]]` 生成图谱
 - 📓 兼容 Obsidian vault，Web 版图谱无需 Electron
 - ⚡ 零配置 — 指向文件或文件夹，自动识别数据格式
@@ -200,3 +207,10 @@ BrainGraph 让你一目了然：AI 知道了什么，哪些知识是连通的，
 - Claude Code 用户 → 导出记忆后探索
 - Obsidian 用户 → 更好的 Web 版图谱
 - 知识工作者 → 任意结构化数据可视化
+
+### 已知限制
+
+- **关联策略** — 边的生成基于关键词重叠，非语义向量相似度
+- **SQLite 适配器** — 需要表中有可识别的列名（name, type, content 等）
+- **Markdown 关联** — 依赖标题/关键词匹配，无共同关键词的笔记不会关联
+- **大规模数据** — 超过 500 个节点时力导向布局可能卡顿

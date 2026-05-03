@@ -72,8 +72,21 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:system-
 .node-c{cursor:pointer;transition:filter .2s}
 .node-c:hover{filter:brightness(1.4)}
 .node-hl{stroke:var(--yellow)!important;stroke-width:3!important;filter:drop-shadow(0 0 8px var(--yellow))}
-.link-l{stroke:var(--border-h);stroke-opacity:.2;transition:stroke-opacity .2s}
-.link-l:hover{stroke-opacity:.6}
+/* Edge types */
+.link-wikilink{stroke:#22c55e;stroke-dasharray:5,4;stroke-opacity:.35}
+.link-keyword{stroke:#3b82f6;stroke-width:1.2;stroke-opacity:.3}
+.link-entity{stroke:#f97316;stroke-width:2;stroke-opacity:.3}
+.link-unknown{stroke:var(--border-h);stroke-opacity:.2}
+
+.link-l:hover{stroke-opacity:.7}
+
+/* Stats panel */
+.stats{position:fixed;bottom:16px;left:200px;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;z-index:100;font-size:11px;max-height:260px;overflow-y:auto}
+.stats h3{font-size:10px;text-transform:uppercase;color:var(--text3);letter-spacing:1px;margin-bottom:6px}
+.stats-row{display:flex;justify-content:space-between;padding:2px 0;color:var(--text2)}
+.stats-row span:last-child{color:var(--text);font-weight:500}
+.stats-bar{height:3px;background:var(--border);border-radius:2px;margin-top:2px}
+.stats-bar-fill{height:100%;border-radius:2px;transition:width .3s}
 .node-lbl{font-size:10px;fill:var(--text2);pointer-events:none;text-anchor:middle;dominant-baseline:central}
 
 /* Zoom */
@@ -114,6 +127,7 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:system-
 <div class="panel" id="panel"><button class="panel-close" id="panelClose">✕</button><div class="panel-hdr"><h2 id="panelName"></h2><div class="panel-meta"><span id="panelType"></span><span id="panelFacts"></span></div></div><div class="panel-body" id="panelBody"></div></div>
 <div class="zoom"><button id="zIn">+</button><button id="zOut">−</button><button id="zReset">⟲</button></div>
 <div class="legend" id="legend"></div>
+<div class="stats" id="stats"></div>
 <div id="graph"></div>
 
 <script>
@@ -143,12 +157,14 @@ function render(d){
   allNodes=[...d.nodes];allEdges=[...d.edges];
   buildLegend(d.nodes);
   buildFilters(d.nodes);
+  buildStats(d.nodes,d.edges);
   buildGraph(d.nodes,d.edges);
 }
 
 function buildLegend(nodes){
   const types=[...new Set(nodes.map(n=>n.type))];
-  document.getElementById('legend').innerHTML='<h3>Types</h3>'+types.map(t=>'<div class="legend-item"><div class="legend-dot" style="background:'+gc(t)+'"></div>'+t+'</div>').join('');
+  const edgeTypes=[{type:'wikilink',color:'#22c55e',label:'Wiki Link',dash:true},{type:'keyword',color:'#3b82f6',label:'Keyword'},{type:'entity',color:'#f97316',label:'Shared Fact'}];
+  document.getElementById('legend').innerHTML='<h3>Node Types</h3>'+types.map(t=>'<div class="legend-item"><div class="legend-dot" style="background:'+gc(t)+'"></div>'+t+'</div>').join('')+'<h3 style="margin-top:8px">Edge Types</h3>'+edgeTypes.map(e=>'<div class="legend-item"><div style="width:20px;height:2px;background:'+e.color+';'+(e.dash?'border-top:2px dashed '+e.color+';background:none':'')+'"></div>'+e.label+'</div>').join('');
 }
 
 function buildFilters(nodes){
@@ -189,8 +205,8 @@ function buildGraph(nodes,edges){
     .force('center',d3.forceCenter(W/2,H/2))
     .force('collision',d3.forceCollide().radius(d=>rad(d)+3));
 
-  const link=g.selectAll('.link-g').data(edges).join('line').attr('class','link-l')
-    .attr('stroke-width',d=>Math.max(.5,Math.min(3,d.weight||1)));
+  const link=g.selectAll('.link-g').data(edges).join('line').attr('class',d=>'link-l link-g link-'+(d.type||'unknown'))
+    .attr('stroke-width',d=>d.type==='entity'?2:d.type==='keyword'?1.2:Math.max(.5,Math.min(3,d.weight||1)));
 
   const node=g.selectAll('.node-g').data(nodes).join('g').attr('class','node-g')
     .call(d3.drag().on('start',(e,d)=>{if(!e.active)sim.alphaTarget(.3).restart();d.fx=d.x;d.fy=d.y;})
@@ -301,6 +317,22 @@ document.getElementById('exportBtn').onclick=()=>{
 
 // Filter toggle
 document.getElementById('filterToggle').onclick=()=>document.getElementById('filterBody').classList.toggle('open');
+
+function buildStats(nodes,edges){
+  const types={};nodes.forEach(n=>{types[n.type]=(types[n.type]||0)+1;});
+  const isolated=new Set(nodes.map(n=>n.id));
+  edges.forEach(e=>{isolated.delete(e.source.id||e.source);isolated.delete(e.target.id||e.target);});
+  const topNodes=nodes.slice().sort((a,b)=>(b.facts||0)-(a.facts||0)).slice(0,5);
+  const maxType=Math.max(...Object.values(types));
+  document.getElementById('stats').innerHTML='<h3>Statistics</h3>'
+    +'<div class="stats-row"><span>Total Nodes</span><span>'+nodes.length+'</span></div>'
+    +'<div class="stats-row"><span>Total Edges</span><span>'+edges.length+'</span></div>'
+    +'<div class="stats-row"><span>Isolated</span><span>'+isolated.size+'</span></div>'
+    +'<h3 style="margin-top:6px">By Type</h3>'
+    +Object.entries(types).sort((a,b)=>b[1]-a[1]).map(([t,c])=>'<div class="stats-row"><span>'+t+'</span><span>'+c+'</span></div><div class="stats-bar"><div class="stats-bar-fill" style="width:'+Math.round(c/maxType*100)+'%;background:'+gc(t)+'"></div></div>').join('')
+    +'<h3 style="margin-top:6px">Top Connected</h3>'
+    +topNodes.map(n=>'<div class="stats-row"><span style="color:'+gc(n.type)+'">'+n.id+'</span><span>'+n.facts+' facts</span></div>').join('');
+}
 
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
 init();

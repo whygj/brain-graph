@@ -14,12 +14,15 @@ import sqlite3
 import os
 import re
 import sys
+import logging
 from collections import Counter
 
 # Add parent dir for auth_helper import
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from flask import Flask, jsonify, send_from_directory, request, redirect, url_for
 from auth_helper import auth_bp, login_required, set_site_branding
+
+logger = logging.getLogger(__name__)
 
 DB_PATH = "/home/ubuntu/.hermes/memory_store.db"
 PROJECTS_PATH = "/home/ubuntu/projects"
@@ -39,63 +42,119 @@ set_site_branding("🕸️", "知识图谱")
 SOURCES = {}
 
 
-def _load_sqlite(db_path):
-    """Load entities and relations from fact_store."""
+def _load_sqlite(db_path: str) -> dict:
+    """Load entities and relations from fact_store with auto-schema detection."""
     if not os.path.exists(db_path):
         return {"nodes": [], "edges": [], "entity_facts": {}, "stats": {}}
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
 
-    cur = conn.execute("""
-        SELECT e.name, e.entity_type, COUNT(fe.fact_id) AS fact_count
-        FROM entities e LEFT JOIN fact_entities fe ON fe.entity_id = e.entity_id
-        GROUP BY e.entity_id ORDER BY fact_count DESC
-    """)
-    nodes = [{"id": r[0], "type": r[1] or "unknown", "facts": r[2]} for r in cur.fetchall()]
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+    except Exception as exc:
+        logger.error("Cannot open SQLite DB %s: %s", db_path, exc)
+        return {"nodes": [], "edges": [], "entity_facts": {}, "stats": {}}
 
-    cur = conn.execute("""
-        SELECT e1.name AS src, e2.name AS tgt, COUNT(*) AS shared,
-               GROUP_CONCAT(f.content, '|||') AS contents
-        FROM fact_entities fe1
-        JOIN fact_entities fe2 ON fe1.fact_id = fe2.fact_id AND fe1.entity_id < fe2.entity_id
-        JOIN entities e1 ON fe1.entity_id = e1.entity_id
-        JOIN entities e2 ON fe2.entity_id = e2.entity_id
-        JOIN facts f ON fe1.fact_id = f.fact_id
-        GROUP BY e1.entity_id, e2.entity_id
-    """)
-    edges = [{
-        "source": r[0], "target": r[1],
-        "weight": r[2],
-        "label": r[3].split("|||")[0][:80] if r[3] else "",
-        "shared_facts": r[3].split("|||") if r[3] else []
-    } for r in cur.fetchall()]
+    # Detect schema
+    tables = [r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+    ).fetchall()]
 
-    cur = conn.execute("""
-        SELECT e.name, GROUP_CONCAT(f.content, '|||') AS all_facts
-        FROM entities e JOIN fact_entities fe ON fe.entity_id = e.entity_id
-        JOIN facts f ON fe.fact_id = f.fact_id GROUP BY e.entity_id
-    """)
-    entity_facts = {r[0]: r[1].split("|||") for r in cur.fetchall()}
+    t_lower = {t.lower(): t for t in tables}
+    et = t_lower.get("entities")
+    ft = t_lower.get("facts")
+    lt = t_lower.get("fact_entities")
 
-    types = Counter(n["type"] for n in nodes)
-    stats = {
-        "total_nodes": len(nodes), "total_edges": len(edges),
-        "total_facts": sum(n["facts"] for n in nodes),
-        "types": dict(types.most_common()),
-        "isolated": sum(1 for n in nodes if n["facts"] == 0),
-    }
-    conn.close()
-    return {"nodes": nodes, "edges": edges, "entity_facts": entity_facts, "stats": stats}
+    if not (et and ft and lt):
+        # Try adapter-based loading if standard tables not found
+        conn.close()
+        from adapters.sqlite_adapter import SQLiteAdapter
+        adapter = SQLiteAdapter({"path": db_path})
+        return {
+            "nodes": adapter.nodes,
+            "edges": adapter.edges,
+            "entity_facts": adapter.entity_facts,
+            "stats": adapter.stats,
+        }
+
+    try:
+        # Standard Hermes schema
+        cur = conn.execute("""
+            SELECT e.name, e.entity_type, COUNT(fe.fact_id) AS fact_count
+            FROM entities e LEFT JOIN fact_entities fe ON fe.entity_id = e.entity_id
+            GROUP BY e.entity_id ORDER BY fact_count DESC
+        """)
+        nodes = [{"id": r[0], "type": r[1] or "unknown", "facts": r[2]} for r in cur.fetchall()]
+
+        cur = conn.execute("""
+            SELECT e1.name AS src, e2.name AS tgt, COUNT(*) AS shared,
+                   GROUP_CONCAT(f.content, '|||') AS contents
+            FROM fact_entities fe1
+            JOIN fact_entities fe2 ON fe1.fact_id = fe2.fact_id AND fe1.entity_id < fe2.entity_id
+            JOIN entities e1 ON fe1.entity_id = e1.entity_id
+            JOIN entities e2 ON fe2.entity_id = e2.entity_id
+            JOIN facts f ON fe1.fact_id = f.fact_id
+            GROUP BY e1.entity_id, e2.entity_id
+        """)
+        edges = [{
+            "source": r[0], "target": r[1],
+            "weight": r[2],
+            "label": r[3].split("|||")[0][:80] if r[3] else "",
+            "type": "entity",
+            "shared_facts": r[3].split("|||") if r[3] else []
+        } for r in cur.fetchall()]
+
+        cur = conn.execute("""
+            SELECT e.name, GROUP_CONCAT(f.content, '|||') AS all_facts
+            FROM entities e JOIN fact_entities fe ON fe.entity_id = e.entity_id
+            JOIN facts f ON fe.fact_id = f.fact_id GROUP BY e.entity_id
+        """)
+        entity_facts = {r[0]: r[1].split("|||") for r in cur.fetchall()}
+
+        # Compute enhanced stats
+        types = Counter(n["type"] for n in nodes)
+        degree: Counter = Counter()
+        for e in edges:
+            degree[e["source"]] += 1
+            degree[e["target"]] += 1
+        top5 = [{"id": n, "degree": d} for n, d in degree.most_common(5)]
+        connected = set()
+        for e in edges:
+            connected.add(e["source"])
+            connected.add(e["target"])
+
+        stats = {
+            "total_nodes": len(nodes), "total_edges": len(edges),
+            "total_facts": sum(n["facts"] for n in nodes),
+            "types": dict(types.most_common()),
+            "isolated": sum(1 for n in nodes if n["id"] not in connected),
+            "top5": top5,
+            "edge_types": {"entity": len(edges)},
+        }
+        return {"nodes": nodes, "edges": edges, "entity_facts": entity_facts, "stats": stats}
+    except Exception as exc:
+        logger.error("Error loading Hermes schema from %s: %s", db_path, exc)
+        conn.close()
+        from adapters.sqlite_adapter import SQLiteAdapter
+        adapter = SQLiteAdapter({"path": db_path})
+        return {
+            "nodes": adapter.nodes,
+            "edges": adapter.edges,
+            "entity_facts": adapter.entity_facts,
+            "stats": adapter.stats,
+        }
+    finally:
+        conn.close()
 
 
-def _load_projects(name, dir_path):
+def _load_projects(name: str, dir_path: str) -> dict:
     """Load markdown files from a project directory as graph nodes.
-    
+
     Edge generation strategies (in priority order):
     1. [[wikilinks]] — explicit manual links in content
-    2. Same-directory grouping — files in same subdir are lightly connected
-    3. Tag/title keyword overlap — files sharing significant keywords are connected
-    
+    2. Tag overlap — files sharing tags
+    3. Same-directory grouping — files in same subdir are lightly connected
+    4. Tag/title keyword overlap — files sharing significant keywords are connected
+
     This ensures rich graphs even without manual wikilinks.
     """
     if not os.path.isdir(dir_path):
@@ -103,6 +162,14 @@ def _load_projects(name, dir_path):
 
     link_re = re.compile(r"\[\[([^\]|]+?)(?:\|[^\]]+?)?\]\]")
     tag_re = re.compile(r"^tags:\s*\[(.+?)\]", re.MULTILINE)
+
+    # Stopwords for keyword filtering
+    stopwords = {
+        "the", "and", "for", "that", "this", "with", "from", "are", "was",
+        "not", "but", "all", "can", "has", "have", "will", "you", "your",
+        "into", "how", "what", "why", "when", "than", "then", "them", "they",
+        "been", "some", "more", "very", "also", "just", "like", "about",
+    }
 
     # Skip hidden dirs, node_modules, .git, __pycache__, .venv
     skip_dirs = {".git", "node_modules", "__pycache__", ".venv", ".cache"}
@@ -119,22 +186,34 @@ def _load_projects(name, dir_path):
             group = rel if rel != "." else name
             try:
                 text = open(fp, encoding="utf-8", errors="ignore").read()
-            except:
+            except Exception:
                 continue
             links = list(set(link_re.findall(text)))
             first_line = text.split("\n")[0][:120] if text else ""
-            
+
+            # Extract frontmatter tags
+            tags = []
+            if text.startswith("---"):
+                parts = text.split("---", 2)
+                if len(parts) >= 3:
+                    fm = parts[1]
+                    for line in fm.split("\n"):
+                        stripped = line.strip()
+                        if stripped.startswith("tags:") or stripped.startswith("tag:"):
+                            tag_val = stripped.split(":", 1)[1].strip()
+                            if tag_val.startswith("["):
+                                tags = [t[0] or t[1] for t in re.findall(r'"([^"]+)"|(\w+)', tag_val)]
+                            elif tag_val:
+                                tags.append(tag_val.strip('"').strip("'"))
+
             # Extract keywords from title and headings for auto-linking
             headings = re.findall(r"^#+\s+(.+)$", text, re.MULTILINE)
             title_words = set(re.findall(r"[\u4e00-\u9fff]{2,}|[a-zA-Z]{3,}", first_line))
             heading_words = set()
             for h in headings[:5]:
                 heading_words.update(re.findall(r"[\u4e00-\u9fff]{2,}|[a-zA-Z]{3,}", h))
-            keywords = title_words | heading_words
-            # Filter common stopwords
-            stopwords = {"the", "and", "for", "that", "this", "with", "from", "are", "was", "not", "but", "all", "can", "has", "have", "will", "you", "your", "into", "how", "what", "why", "when", "than", "then", "them", "they", "been", "some", "more", "very", "also", "just", "like", "about"}
-            keywords = keywords - stopwords
-            
+            keywords = (title_words | heading_words) - stopwords
+
             files[node_id] = {
                 "content": first_line,
                 "links": links,
@@ -142,6 +221,7 @@ def _load_projects(name, dir_path):
                 "path": os.path.relpath(fp, dir_path),
                 "size": len(text),
                 "keywords": keywords,
+                "tags": tags,
             }
 
     # Deduplicate node IDs by appending parent dir if collision
@@ -162,27 +242,37 @@ def _load_projects(name, dir_path):
     nodes = [{
         "id": n,
         "type": "note",
-        "facts": len(f["links"]),
+        "facts": len(f["links"]) + len(f.get("tags", [])),
         "group": f["group"],
         "size": f.get("size", 0),
     } for n, f in final_files.items()]
 
     edge_set = set()
     edges = []
-    
-    def add_edge(src, tgt, weight, label):
+
+    def add_edge(src: str, tgt: str, weight: int, label: str, etype: str) -> None:
         key = tuple(sorted([src, tgt]))
         if key not in edge_set and src != tgt:
             edge_set.add(key)
-            edges.append({"source": src, "target": tgt, "weight": weight, "label": label})
+            edges.append({"source": src, "target": tgt, "weight": weight, "label": label, "type": etype})
 
     # Strategy 1: [[wikilinks]] (strongest, weight=3)
     for name_, f in final_files.items():
         for link in f["links"]:
             if link in final_files:
-                add_edge(name_, link, 3, "[[" + link + "]]")
+                add_edge(name_, link, 3, f"[[{link}]]", "wikilink")
 
-    # Strategy 2: Keyword overlap (weight=2 for 3+ shared keywords)
+    # Strategy 2: Tag overlap (weight=2)
+    tag_map: dict[str, list[str]] = {}
+    for name_, f in final_files.items():
+        for tag in f.get("tags", []):
+            tag_map.setdefault(tag, []).append(name_)
+    for tag, node_ids in tag_map.items():
+        for i in range(len(node_ids)):
+            for j in range(i + 1, len(node_ids)):
+                add_edge(node_ids[i], node_ids[j], 2, f"tag: {tag}", "wikilink")
+
+    # Strategy 3: Keyword overlap (weight=2 for 3+ shared keywords)
     node_list = list(final_files.items())
     for i in range(len(node_list)):
         name_a, fa = node_list[i]
@@ -197,15 +287,37 @@ def _load_projects(name, dir_path):
             shared = kwa & kwb
             if len(shared) >= 3:
                 sample = list(shared)[:3]
-                add_edge(name_a, name_b, 2, f"关键词: {', '.join(sample)}")
+                add_edge(name_a, name_b, 2, f"关键词: {', '.join(sample)}", "keyword")
+
+    # Strategy 4: Same-directory grouping (weak, weight=1)
+    dir_map: dict[str, list[str]] = {}
+    for name_, f in final_files.items():
+        g = f.get("group", "")
+        if g and g != name:
+            dir_map.setdefault(g, []).append(name_)
+    for dir_name, node_ids in dir_map.items():
+        if len(node_ids) > 50:
+            continue
+        for i in range(len(node_ids)):
+            for j in range(i + 1, len(node_ids)):
+                add_edge(node_ids[i], node_ids[j], 1, f"dir: {dir_name}", "keyword")
 
     entity_facts = {n: [f["content"][:200]] for n, f in final_files.items()}
 
+    # Enhanced stats
     dir_counts = Counter(f["group"] for f in final_files.values())
     total_size = sum(f.get("size", 0) for f in final_files.values())
-    edge_types = Counter(
-        "wikilink" if e["weight"] == 3 else "keyword" for e in edges
-    )
+    edge_types = Counter(e.get("type", "unknown") for e in edges)
+    degree: Counter = Counter()
+    for e in edges:
+        degree[e["source"]] += 1
+        degree[e["target"]] += 1
+    top5 = [{"id": n, "degree": d} for n, d in degree.most_common(5)]
+    connected = set()
+    for e in edges:
+        connected.add(e["source"])
+        connected.add(e["target"])
+
     stats = {
         "total_nodes": len(nodes),
         "total_edges": len(edges),
@@ -213,6 +325,8 @@ def _load_projects(name, dir_path):
         "edge_types": dict(edge_types),
         "directories": dict(dir_counts.most_common(20)),
         "total_size_kb": round(total_size / 1024, 1),
+        "top5": top5,
+        "isolated": sum(1 for n in nodes if n["id"] not in connected),
     }
     return {"nodes": nodes, "edges": edges, "entity_facts": entity_facts, "stats": stats}
 
@@ -227,8 +341,11 @@ for name, data in SOURCES.items():
     n_nodes = data["stats"].get("total_nodes", 0)
     n_edges = data["stats"].get("total_edges", 0)
     dirs = data["stats"].get("directories", {})
+    warnings = data["stats"].get("warnings", [])
     print(f"[Graph] {name}: {n_nodes} nodes, {n_edges} edges"
           + (f", top dirs: {list(dirs.keys())[:5]}" if dirs else ""))
+    for w in warnings:
+        print(f"  ⚠ {w}")
 
 
 @app.route("/")
